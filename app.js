@@ -599,9 +599,14 @@ const _wdir = new THREE.Vector3();
 const WORLD_WIND = new THREE.Vector3(0.22, 0.14, 1.0);   // world-space flutter direction (toward camera + a little lateral)
 
 function wake() {
+  // No dark "wake-in" ramp: render the first frame FULLY lit (shadow included)
+  // BEFORE the loading veil fades, so the reveal is a clean crossfade onto the
+  // finished scene — no black cut, no dim glitchy background easing in.
   awake = true;
-  document.body.classList.add('awake');
+  wakeT = 1;
+  renderer.shadowMap.needsUpdate = true;
   renderFrame();
+  document.body.classList.add('awake');
 }
 
 function updateLabels() {
