@@ -12,7 +12,6 @@ import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
-import { BokehPass } from 'three/addons/postprocessing/BokehPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { RectAreaLightUniformsLib } from 'three/addons/lights/RectAreaLightUniformsLib.js';
@@ -70,9 +69,9 @@ const P = {
   petalWind: 0.085,       // scene units — petal-edge flutter (tips only, base anchored)
   pollenPull: 0.16,       // how much pollen leans toward the cursor (magnetic drift)
 
-  dofFocus: 24.9,         // world distance to the focal plane (≈ orbit radius)
-  dofAperture: 0.00016,   // small = a gentle, shallow bokeh
-  dofMaxblur: 0.006,
+  dragSpeed: 0.0046,      // rad per pixel dragged (click-drag to look around)
+  maxYawOrbit: 0.92,      // rad (~53°) — rich 3D sides; the bloom is shallow, so it slivers past this
+  maxPitchOrbit: 0.5,     // rad (~29°) — look over/under without flipping
 };
 
 const REDUCE = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -90,7 +89,8 @@ try {
 renderer.toneMapping = THREE.NoToneMapping;   // Blender view transform was "Standard"; rolloff done in the grade
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.VSMShadowMap;   // Eevee spot had radius 4 — very soft
-let maxDpr = Math.min(window.devicePixelRatio || 1, 2);
+renderer.shadowMap.autoUpdate = false;          // the flower barely moves — render the shadow only while it settles
+let maxDpr = Math.min(window.devicePixelRatio || 1, 1.5);   // 1.5 stays crisp on organic content, ~44% less fill than 2
 renderer.setPixelRatio(maxDpr);
 
 const scene = new THREE.Scene();
@@ -212,10 +212,15 @@ function makePetalMaterial(name) {
     shader.uniforms.uGlow = { value: 0 };
     shader.uniforms.uTime = { value: 0 };
     shader.uniforms.uWindAmp = { value: 0 };
+    shader.uniforms.uWindDir = { value: new THREE.Vector3(0, 0, 1) };
     // wind: flutter the petal EDGES (weighted by distance from the flower's
-    // heart, so the base stays anchored and the click target barely moves)
+    // heart, so the base stays anchored and the click target barely moves).
+    // uWindDir is the object-space wind direction, precomputed per frame on
+    // the CPU — a shared delta for coincident front/back rim verts (no split),
+    // and no per-vertex matrix inverse (much cheaper than it looks).
     shader.vertexShader = shader.vertexShader
       .replace('void main() {', `uniform float uTime, uWindAmp;
+uniform vec3 uWindDir;
 void main() {`)
       .replace('#include <begin_vertex>', `#include <begin_vertex>
 {
@@ -223,10 +228,7 @@ void main() {`)
   float w = smoothstep( 1.3, 5.2, length( wp.xy ) );
   float ph = wp.x * 0.6 + wp.y * 0.55;
   float flex = sin( uTime * 1.5 + ph ) + 0.5 * sin( uTime * 2.3 + ph * 1.7 );
-  // coherent WORLD-space flutter (mostly toward/away camera) — a shared delta
-  // for coincident front/back rim vertices, so thin petal edges never split
-  vec3 worldDelta = vec3( 0.22, 0.14, 1.0 ) * ( uWindAmp * w * flex );
-  transformed += inverse( mat3( modelMatrix ) ) * worldDelta;
+  transformed += uWindDir * ( uWindAmp * w * flex );
 }`);
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <lights_fragment_begin>', `#include <lights_fragment_begin>
@@ -363,7 +365,9 @@ loader.load('assets/flower.glb?v=2', (gltf) => {
       o.material = MATS[matName]();
     }
     if (o.name === 'center_disc' || o.name === 'stem') { o.castShadow = true; o.receiveShadow = true; }
-    if (o.name === 'backdrop') o.receiveShadow = true;
+    // enlarge the wall so its lit falloff fades to the background at orbit
+    // angles (no hard plane edge / seam when you spin around the flower)
+    if (o.name === 'backdrop') { o.receiveShadow = true; o.scale.multiplyScalar(6); }
   });
   flower.add(gltf.scene);
   flower.updateWorldMatrix(true, true);
@@ -377,6 +381,15 @@ loader.load('assets/flower.glb?v=2', (gltf) => {
     if (dir.lengthSq() < 1e-4) dir.set(0, 1);
     dir.normalize();
     p.userData.anchor = new THREE.Vector3(dir.x * 7.8, dir.y * 7.8, 1.0);
+
+    // one floating song name per petal
+    const el = document.createElement('div');
+    el.className = 'song-label';
+    el.textContent = TRACKS[p.name]?.title || '';
+    el.addEventListener('click', (ev) => { ev.stopPropagation(); navigate(p); });   // tapping the name (mobile) navigates
+    labelsWrap.appendChild(el);
+    p.userData.labelEl = el;
+    if (COARSE) el.classList.add('show');   // touch: every name visible as a pickable menu
   }
   wake();
 }, undefined, (err) => {
@@ -385,17 +398,9 @@ loader.load('assets/flower.glb?v=2', (gltf) => {
 });
 
 /* ================= composer ================= */
-const rt = new THREE.WebGLRenderTarget(2, 2, { type: THREE.HalfFloatType, samples: COARSE ? 0 : 4 });
+const rt = new THREE.WebGLRenderTarget(2, 2, { type: THREE.HalfFloatType, samples: COARSE ? 0 : 2 });
 const composer = new EffectComposer(renderer, rt);
 composer.addPass(new RenderPass(scene, camera));
-
-// a gentle depth of field — softens the wall + far pollen so the flower snaps
-// forward (skipped on phones to protect the framerate: it re-renders depth)
-let bokeh = null;
-if (!COARSE) {
-  bokeh = new BokehPass(scene, camera, { focus: P.dofFocus, aperture: P.dofAperture, maxblur: P.dofMaxblur });
-  composer.addPass(bokeh);
-}
 
 const bloom = new UnrealBloomPass(new THREE.Vector2(1024, 1024), P.bloomStrength, P.bloomRadius, P.bloomThreshold);
 composer.addPass(bloom);
@@ -442,18 +447,20 @@ composer.addPass(grade);
 /* ================= interaction ================= */
 const raycaster = new THREE.Raycaster();
 const ndc = new THREE.Vector2(-2, -2);
-const labelEl = document.getElementById('label');
-const labelTitle = labelEl.querySelector('.lbl-title');
-const labelSub = labelEl.querySelector('.lbl-sub');
+const labelsWrap = document.getElementById('labels');
 const flashEl = document.getElementById('flash');
 let hovered = null;
-let armedPetal = null;   // touch: first tap arms, second tap navigates
 
-// orbit input (mouse/gyro), in -1..1
+// orbit input, in -1..1 (hover/gyro parallax — a small overlay on the drag)
 const aim = { tx: 0, ty: 0 };
-let yaw = 0, pitch = 0;
+let yaw = 0, pitch = 0;               // smoothed camera angles
 const yawVel = { v: 0 }, pitchVel = { v: 0 };
+let dragYaw = 0, dragPitch = 0;      // accumulated by click-drag (yaw spins a full 360°)
 let lastInput = -10;
+
+// drag vs. click
+let dragId = null, dragMoved = false, dragPX = 0, dragPY = 0;
+const DRAG_THRESH = 6;   // px of movement before a press becomes a drag (not a click)
 
 function setPointer(clientX, clientY) {
   const w = innerWidth || canvas.clientWidth || 1;
@@ -491,25 +498,16 @@ function petalAt() {
   return hit ? hit.object : null;
 }
 
-function showLabel(petal) {
-  const t = TRACKS[petal.name];
-  labelTitle.textContent = t?.title || '';
-  labelSub.textContent = t?.url ? 'listen ↗' : 'coming soon';
-  labelEl.classList.toggle('soon', !t?.url);
-  labelEl.hidden = false;
-  requestAnimationFrame(() => labelEl.classList.add('show'));
-}
-
+// desktop hover: glow the petal + reveal only its name; touch shows them all
 function setHover(petal) {
-  if (hovered === petal) return;
-  if (hovered) hovered.material.userData.glowTarget = 0;
+  if (COARSE || hovered === petal) return;
+  if (hovered) { hovered.material.userData.glowTarget = 0; hovered.userData.labelEl?.classList.remove('show'); }
   hovered = petal;
   if (petal) {
     petal.material.userData.glowTarget = 1;
-    showLabel(petal);
+    petal.userData.labelEl?.classList.add('show');
     document.body.classList.add('hovering', 'reading');   // let the chrome recede
   } else {
-    labelEl.classList.remove('show');
     document.body.classList.remove('hovering', 'reading');
   }
 }
@@ -522,22 +520,41 @@ function navigate(petal) {
   setTimeout(() => window.open(t.url, '_top'), 330);
 }
 
-addEventListener('pointermove', (e) => {
+addEventListener('pointerdown', (e) => {
+  dragId = e.pointerId; dragMoved = false; dragPX = e.clientX; dragPY = e.clientY;
   setPointer(e.clientX, e.clientY);
+  armGyro();
+});
+
+addEventListener('pointermove', (e) => {
+  if (dragId === e.pointerId) {                       // dragging → orbit
+    const dx = e.clientX - dragPX, dy = e.clientY - dragPY;
+    if (!dragMoved && Math.hypot(dx, dy) > DRAG_THRESH) { dragMoved = true; setHover(null); document.body.classList.add('grabbing'); }
+    if (dragMoved) {
+      dragYaw = THREE.MathUtils.clamp(dragYaw - dx * P.dragSpeed, -P.maxYawOrbit, P.maxYawOrbit);
+      dragPitch = THREE.MathUtils.clamp(dragPitch + dy * P.dragSpeed, -P.maxPitchOrbit, P.maxPitchOrbit);
+      dragPX = e.clientX; dragPY = e.clientY;
+      lastInput = clock.elapsedTime;
+    }
+    return;
+  }
+  setPointer(e.clientX, e.clientY);                   // not dragging → hover parallax + petal hover
   if (!COARSE) setHover(petalAt());
 });
-addEventListener('pointerdown', (e) => { setPointer(e.clientX, e.clientY); armGyro(); });
-addEventListener('click', (e) => {
-  setPointer(e.clientX, e.clientY);
-  const petal = petalAt();
-  if (!petal) { setHover(null); armedPetal = null; return; }
-  if (COARSE) {
-    if (armedPetal === petal) { navigate(petal); armedPetal = null; }
-    else { armedPetal = petal; setHover(petal); }
-  } else {
-    navigate(petal);
+
+function endDrag(e) {
+  if (dragId !== e.pointerId) return;
+  const wasDrag = dragMoved;
+  dragId = null; dragMoved = false;
+  document.body.classList.remove('grabbing');
+  if (!wasDrag) {                                     // a real click/tap → navigate the petal under it
+    setPointer(e.clientX, e.clientY);
+    const petal = petalAt();
+    if (petal) navigate(petal);
   }
-});
+}
+addEventListener('pointerup', endDrag);
+addEventListener('pointercancel', () => { dragId = null; dragMoved = false; document.body.classList.remove('grabbing'); });
 
 /* ================= math ================= */
 // Unity-style critically-damped smoothing — no overshoot, frame-rate independent
@@ -558,6 +575,9 @@ let awake = false;
 const _proj = new THREE.Vector3();
 const _attract = new THREE.Vector3();
 const _flowerPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);   // z=0, the bloom's plane
+const _m3 = new THREE.Matrix3();
+const _wdir = new THREE.Vector3();
+const WORLD_WIND = new THREE.Vector3(0.22, 0.14, 1.0);   // world-space flutter direction (toward camera + a little lateral)
 
 function wake() {
   awake = true;
@@ -565,19 +585,23 @@ function wake() {
   renderFrame();
 }
 
-function updateLabel() {
-  if (!hovered || !hovered.userData.anchor) return;
-  _proj.copy(hovered.userData.anchor).project(camera);
+function updateLabels() {
   const w = innerWidth || 1, h = innerHeight || 1;
-  const x = THREE.MathUtils.clamp((_proj.x * 0.5 + 0.5) * w, 96, w - 96);
-  const y = THREE.MathUtils.clamp((-_proj.y * 0.5 + 0.5) * h, 92, h - 104);
-  labelEl.style.left = x + 'px';
-  labelEl.style.top = y + 'px';
+  for (const p of petals) {
+    const el = p.userData.labelEl;
+    if (!el || !el.classList.contains('show')) continue;
+    _proj.copy(p.userData.anchor).project(camera);
+    if (_proj.z > 1) { el.style.visibility = 'hidden'; continue; }   // anchor swung behind the camera → hide
+    el.style.visibility = '';
+    el.style.left = THREE.MathUtils.clamp((_proj.x * 0.5 + 0.5) * w, 70, w - 70) + 'px';
+    el.style.top  = THREE.MathUtils.clamp((-_proj.y * 0.5 + 0.5) * h, 78, h - 92) + 'px';
+  }
 }
 
 function tick(dt, t) {
   if (awake && wakeT < 1) wakeT = Math.min(1, wakeT + dt / 2.6);
   const ease = wakeT * wakeT * (3 - 2 * wakeT);
+  if (wakeT < 1) renderer.shadowMap.needsUpdate = true;   // render the soft shadow only while the flower settles, then freeze it
 
   applyLightExposure(0.25 + 0.75 * ease);
   for (const L of lights.inner) {
@@ -594,13 +618,15 @@ function tick(dt, t) {
     P.breezeYaw  * gust * (0.6 * Math.sin(t * 0.19 + 0.7) + 0.4 * Math.sin(t * 0.33 + 2.1)),
     P.breezeRoll * gust *  Math.sin(t * 0.21 + 0.5),
   );
+  swayGroup.updateMatrixWorld(true);   // so each petal's matrixWorld is current for the wind-direction uniform below
 
-  // orbit targets: mouse/gyro + a slow idle drift, all around the flower's heart
+  // orbit = accumulated drag (full 360°) + a small hover/gyro parallax + idle drift
+  const overlay = dragId === null ? 1 : 0;   // no parallax while a drag is in progress
   const idle = REDUCE ? 0 : THREE.MathUtils.clamp((t - lastInput - 2.5) / 3, 0, 1);
-  const driftY = idle * P.driftYaw * P.maxYaw * Math.sin(t * 0.16);
-  const driftP = idle * P.driftPitch * P.maxPitch * Math.sin(t * 0.13 + 1.3);
-  const yawT = aim.tx * P.maxYaw + driftY;
-  const pitchT = aim.ty * P.maxPitch + driftP;
+  const driftY = overlay * idle * P.driftYaw * P.maxYaw * Math.sin(t * 0.16);
+  const driftP = overlay * idle * P.driftPitch * P.maxPitch * Math.sin(t * 0.13 + 1.3);
+  const yawT = THREE.MathUtils.clamp(dragYaw + overlay * aim.tx * P.maxYaw + driftY, -P.maxYawOrbit, P.maxYawOrbit);
+  const pitchT = THREE.MathUtils.clamp(dragPitch + overlay * aim.ty * P.maxPitch + driftP, -P.maxPitchOrbit, P.maxPitchOrbit);
   if (REDUCE) { yaw = yawT; pitch = pitchT; }
   else {
     yaw = smoothDamp(yaw, yawT, yawVel, P.orbitSmooth, dt);
@@ -613,7 +639,14 @@ function tick(dt, t) {
     const ud = p.material.userData;
     ud.glow += (ud.glowTarget - ud.glow) * Math.min(1, dt * 6.5);
     const sh = petalShaders[p.name];
-    if (sh) { sh.uniforms.uGlow.value = ud.glow; sh.uniforms.uTime.value = t; sh.uniforms.uWindAmp.value = windAmp; }
+    if (sh) {
+      sh.uniforms.uGlow.value = ud.glow;
+      sh.uniforms.uTime.value = t;
+      sh.uniforms.uWindAmp.value = windAmp;
+      // object-space wind direction = inverse(rotation) * world direction (cheap, per petal)
+      _wdir.copy(WORLD_WIND).applyMatrix3(_m3.setFromMatrix4(p.matrixWorld).invert());
+      sh.uniforms.uWindDir.value.copy(_wdir);
+    }
   }
 
   // ---- pollen leans toward the cursor (world point where the ray meets the bloom plane) ----
@@ -629,7 +662,7 @@ function tick(dt, t) {
     pollenMat.uniforms.uPull.value += (pullTarget - pollenMat.uniforms.uPull.value) * Math.min(1, dt * 2.5);
   }
 
-  updateLabel();
+  updateLabels();
   grade.uniforms.uTime.value = REDUCE ? 1 : t;
 }
 
@@ -675,17 +708,11 @@ resize();
 window.__flower = {
   P, lights, camera, scene, bloom, grade, petals, petalShaders, renderer, pollenMat,
   renderOnce: renderFrame,
-  bokeh,
   reflow() {
     baseOffset.copy(REST).sub(PIVOT).multiplyScalar(P.zoom);
     bloom.threshold = P.bloomThreshold; bloom.strength = P.bloomStrength; bloom.radius = P.bloomRadius;
     grade.uniforms.uContrast.value = P.contrast; grade.uniforms.uShoulder.value = P.shoulder;
     grade.uniforms.uGrain.value = P.grain; grade.uniforms.uVig.value = P.vignette;
-    if (bokeh) {
-      bokeh.uniforms.focus.value = P.dofFocus;
-      bokeh.uniforms.aperture.value = P.dofAperture;
-      bokeh.uniforms.maxblur.value = P.dofMaxblur;
-    }
     for (const n in petalShaders) {
       const u = petalShaders[n].uniforms;
       u.uSSSScale.value = P.sssScale; u.uSSSDistortion.value = P.sssDistortion;
@@ -693,6 +720,7 @@ window.__flower = {
     renderFrame();
   },
   setAim(x, y) { aim.tx = x; aim.ty = y; ndc.set(x, -y); renderFrame(); },
+  setOrbit(yawDeg, pitchDeg = 0) { dragYaw = THREE.MathUtils.clamp(yawDeg * Math.PI / 180, -P.maxYawOrbit, P.maxYawOrbit); dragPitch = THREE.MathUtils.clamp(pitchDeg * Math.PI / 180, -P.maxPitchOrbit, P.maxPitchOrbit); yaw = dragYaw; pitch = dragPitch; renderFrame(); },
   hover(name) { const p = petals.find(q => q.name === name); if (p) setHover(p); renderFrame(); },
   wakeNow() { wakeT = 1; renderFrame(); },
 };

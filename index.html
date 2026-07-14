@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>i am — clay and kelsy</title>
 <meta name="description" content="i am — the album. a living flower. click a petal.">
-<link rel="stylesheet" href="styles.css?v=8">
+<link rel="stylesheet" href="styles.css?v=9">
 <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -29,8 +29,9 @@
 
   <div id="wordmark" class="veil">I&nbsp;am</div>
 
-  <!-- floating song name, anchored just outside the hovered petal -->
-  <div id="label" hidden><span class="lbl-inner"><span class="lbl-title"></span><span class="lbl-sub"></span></span></div>
+  <!-- one floating song name per petal, anchored just outside its tip
+       (all shown on touch; hover-revealed on desktop) -->
+  <div id="labels"></div>
 
   <a id="backlink" class="veil" href="https://clayandkelsy.com/" target="_top" rel="noopener">clayandkelsy.com&nbsp;&#8599;</a>
   <div id="credit" class="veil">clay <span>and</span> kelsy</div>
@@ -38,6 +39,6 @@
   <div id="flash" aria-hidden="true"></div>
   <div id="loading"><span>loading</span></div>
 
-  <script type="module" src="app.js?v=10"></script>
+  <script type="module" src="app.js?v=14"></script>
 </body>
 </html>

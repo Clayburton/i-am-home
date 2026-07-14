@@ -21,10 +21,10 @@ html, body {
 #fallback { position: absolute; inset: 0; background: #0d0c0b; }
 #fallback img { width: 100%; height: 100%; object-fit: cover; }
 
-/* ---- the wordmark ---- */
+/* ---- the wordmark (kept high so it clears the top song title) ---- */
 #wordmark {
   position: fixed;
-  top: clamp(26px, 8svh, 84px);
+  top: clamp(14px, 3.6svh, 40px);
   left: 50%;
   transform: translateX(-50%);
   font-family: "Playfair Display", Georgia, serif;
@@ -77,50 +77,31 @@ body.awake .veil { opacity: 1; }
 body.reading #wordmark { opacity: 0.1; transition: opacity 0.6s ease; }
 body.reading #credit   { opacity: 0;   transition: opacity 0.6s ease; }
 
-/* ---- floating song name (anchored outside the petal, gently drifting) ---- */
-#label {
+/* ---- floating song names (one per petal, anchored just outside its tip) ---- */
+.song-label {
   position: fixed;
   z-index: 5;
   transform: translate(-50%, -50%);
   text-align: center;
+  white-space: nowrap;
   pointer-events: none;
   opacity: 0;
   transition: opacity 0.85s cubic-bezier(0.22, 1, 0.36, 1);
   will-change: opacity, left, top;
-}
-#label.show { opacity: 1; }
-
-.lbl-inner {
-  display: inline-flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-  animation: floatbob 6.5s ease-in-out infinite;
-}
-.lbl-title {
   font-family: "Playfair Display", Georgia, serif;
   font-style: italic;
   font-weight: 400;
-  font-size: clamp(21px, 3vmin, 36px);
+  font-size: clamp(20px, 2.9vmin, 34px);
   letter-spacing: 0.015em;
   color: #f6f2ea;
   text-shadow: 0 0 26px rgba(255, 240, 214, 0.5), 0 0 60px rgba(255, 226, 170, 0.28);
-  white-space: nowrap;
+  animation: floatbob 6.5s ease-in-out infinite;
 }
-.lbl-sub {
-  font-family: "Courier Prime", monospace;
-  font-size: clamp(9px, 1.15vmin, 11px);
-  letter-spacing: 0.34em;
-  text-transform: uppercase;
-  color: rgba(246, 242, 234, 0.62);
-  padding-left: 0.34em;
-}
-#label.soon .lbl-title { color: rgba(240, 236, 228, 0.6); text-shadow: 0 0 20px rgba(230, 224, 214, 0.18); }
-#label.soon .lbl-sub { color: rgba(240, 236, 228, 0.32); }
+.song-label.show { opacity: 1; }
 
 @keyframes floatbob {
-  0%, 100% { transform: translateY(-5px); }
-  50%      { transform: translateY(5px); }
+  0%, 100% { transform: translate(-50%, calc(-50% - 5px)); }
+  50%      { transform: translate(-50%, calc(-50% + 5px)); }
 }
 
 /* ---- click transition flash (live tracks open on a white landing) ---- */
@@ -160,15 +141,18 @@ body.awake #loading { opacity: 0; pointer-events: none; }
   50% { opacity: 1; }
 }
 
-body.hovering { cursor: pointer; }
+/* canvas invites a drag; a petal invites a click; a drag shows the closed hand */
+#gl { cursor: grab; }
+body.hovering #gl { cursor: pointer; }
+body.grabbing #gl, body.grabbing { cursor: grabbing; }
 
 /* narrow screens: the centered credit and the corner back link collide —
    the back link carries the brand, so drop the duplicate credit */
 @media (max-width: 620px) {
   #credit { display: none; }
   #backlink { left: 50%; right: auto; transform: translateX(-50%); bottom: clamp(16px, 3.4svh, 30px); }
-  .lbl-title { font-size: clamp(19px, 5.4vw, 26px); }
-  .lbl-sub { font-size: 9px; letter-spacing: 0.3em; }
+  /* touch: every song name is shown and is itself a tap target */
+  .song-label { font-size: clamp(15px, 4.6vw, 22px); pointer-events: auto; }
 }
 
 @media (prefers-reduced-motion: reduce) {
