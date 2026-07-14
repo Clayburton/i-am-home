@@ -397,6 +397,9 @@ loader.load('assets/flower.glb?v=2', (gltf) => {
     p.userData.labelEl = el;
   }
   updateLabelMode();
+  // precompile every shader now (petal SSS, emissive, wind, post stack) so the
+  // first real frames don't stutter — no warmup slowness for anything to react to
+  try { renderer.compile(scene, camera); } catch (e) { /* non-fatal */ }
   wake();
 }, undefined, (err) => {
   console.error('GLB load failed', err);
@@ -690,24 +693,16 @@ function renderFrame() {
   composer.render();
 }
 
-/* adaptive resolution: drop pixel ratio if we can't hold framerate */
-let slow = 0;
-function adapt(dt) {
-  if (dt > 0.024) slow++; else slow = Math.max(0, slow - 2);
-  if (slow > 90 && maxDpr > 1) {
-    maxDpr = Math.max(1, maxDpr - 0.5);
-    renderer.setPixelRatio(maxDpr);
-    if (pollenMat) pollenMat.uniforms.uDpr.value = maxDpr;
-    resize();
-    slow = 0;
-  }
-}
-
+/* No mid-session pixel-ratio governor: changing DPR reallocates the canvas
+   backing store and flashes black for a frame. The old governor mistook the
+   one-time load stutter (shader compile / GPU warmup) for real slowness and
+   dropped DPR 2→1.5→1 — the "cuts to black twice, then fine". The scene is
+   light (~0.75ms/frame), so a fixed DPR is fine; warmup is handled by
+   precompiling shaders at load (see the GLB onload). */
 renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.1);
   tick(dt, clock.elapsedTime);
   composer.render();
-  adapt(dt);
 });
 
 /* ================= dynamic orbit clamp ================= */
