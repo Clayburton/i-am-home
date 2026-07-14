@@ -12,6 +12,7 @@ import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { BokehPass } from 'three/addons/postprocessing/BokehPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { RectAreaLightUniformsLib } from 'three/addons/lights/RectAreaLightUniformsLib.js';
@@ -62,6 +63,16 @@ const P = {
   driftPitch: 0.34,
   gyroDeg: 16,            // phone tilt (deg) for full gyro throw
   gyroThrow: 0.6,
+
+  breezeNod: 0.02,        // rad — whole-flower nod (toward/away) in the breeze
+  breezeYaw: 0.019,       // rad — whole-flower turn (shows petal sides)
+  breezeRoll: 0.011,      // rad — slight roll
+  petalWind: 0.085,       // scene units — petal-edge flutter (tips only, base anchored)
+  pollenPull: 0.16,       // how much pollen leans toward the cursor (magnetic drift)
+
+  dofFocus: 24.9,         // world distance to the focal plane (≈ orbit radius)
+  dofAperture: 0.00016,   // small = a gentle, shallow bokeh
+  dofMaxblur: 0.006,
 };
 
 const REDUCE = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -117,10 +128,17 @@ function placeCamera(yaw, pitch) {
   camera.lookAt(lookTarget);
 }
 
-/* flower group: +90° about X cancels the glTF Y-up conversion */
+/* flower rig: an outer sway group pivots the whole bloom around a point
+   down the stem (so the breeze reads as the stem flexing, not a spin in
+   place); the inner group's +90° about X cancels the glTF Y-up conversion */
+const SWAY_PIVOT_Y = -5;
+const swayGroup = new THREE.Group();
+swayGroup.position.set(0, SWAY_PIVOT_Y, 0);
+scene.add(swayGroup);
 const flower = new THREE.Group();
 flower.rotation.x = Math.PI / 2;
-scene.add(flower);
+flower.position.set(0, -SWAY_PIVOT_Y, 0);   // returns the bloom's heart to world origin
+swayGroup.add(flower);
 
 /* ================= lights (verbatim from the .blend) ================= */
 RectAreaLightUniformsLib.init();
@@ -192,6 +210,24 @@ function makePetalMaterial(name) {
     shader.uniforms.uSSSPower = { value: P.sssPower };
     shader.uniforms.uSSSAmbient = { value: P.sssAmbient };
     shader.uniforms.uGlow = { value: 0 };
+    shader.uniforms.uTime = { value: 0 };
+    shader.uniforms.uWindAmp = { value: 0 };
+    // wind: flutter the petal EDGES (weighted by distance from the flower's
+    // heart, so the base stays anchored and the click target barely moves)
+    shader.vertexShader = shader.vertexShader
+      .replace('void main() {', `uniform float uTime, uWindAmp;
+void main() {`)
+      .replace('#include <begin_vertex>', `#include <begin_vertex>
+{
+  vec3 wp = ( modelMatrix * vec4( transformed, 1.0 ) ).xyz;
+  float w = smoothstep( 1.3, 5.2, length( wp.xy ) );
+  float ph = wp.x * 0.6 + wp.y * 0.55;
+  float flex = sin( uTime * 1.5 + ph ) + 0.5 * sin( uTime * 2.3 + ph * 1.7 );
+  // coherent WORLD-space flutter (mostly toward/away camera) — a shared delta
+  // for coincident front/back rim vertices, so thin petal edges never split
+  vec3 worldDelta = vec3( 0.22, 0.14, 1.0 ) * ( uWindAmp * w * flex );
+  transformed += inverse( mat3( modelMatrix ) ) * worldDelta;
+}`);
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <lights_fragment_begin>', `#include <lights_fragment_begin>
 #if NUM_POINT_LIGHTS > 0
@@ -269,10 +305,12 @@ function makePollen() {
       uTime: { value: 0 }, uH: { value: POLLEN_H }, uHalf: { value: POLLEN_HALF },
       uDpr: { value: maxDpr }, uSize: { value: 46 },
       uColor: { value: C(1.0, 0.86, 0.55) }, uOpacity: { value: 0 },
+      uAttract: { value: new THREE.Vector3(0, 0, 0) }, uPull: { value: 0 },
     },
     vertexShader: `
       attribute float aSpeed, aPhase, aAmp, aScale;
-      uniform float uTime, uH, uHalf, uDpr, uSize;
+      uniform float uTime, uH, uHalf, uDpr, uSize, uPull;
+      uniform vec3 uAttract;
       varying float vTw;
       void main() {
         vec3 p = position;
@@ -280,6 +318,9 @@ function makePollen() {
         p.y = y - uHalf;
         p.x += aAmp * sin(uTime * 0.24 + aPhase);
         p.z += aAmp * 0.6 * cos(uTime * 0.19 + aPhase * 1.3);
+        // gentle lean toward the cursor — only motes nearby feel the pull
+        vec2 toC = uAttract.xy - p.xy;
+        p.xy += toC * (uPull * exp(-dot(toC, toC) * 0.028));
         vec4 mv = modelViewMatrix * vec4(p, 1.0);
         gl_Position = projectionMatrix * mv;
         gl_PointSize = uSize * aScale * uDpr / max(-mv.z, 0.001);
@@ -347,6 +388,14 @@ loader.load('assets/flower.glb?v=2', (gltf) => {
 const rt = new THREE.WebGLRenderTarget(2, 2, { type: THREE.HalfFloatType, samples: COARSE ? 0 : 4 });
 const composer = new EffectComposer(renderer, rt);
 composer.addPass(new RenderPass(scene, camera));
+
+// a gentle depth of field — softens the wall + far pollen so the flower snaps
+// forward (skipped on phones to protect the framerate: it re-renders depth)
+let bokeh = null;
+if (!COARSE) {
+  bokeh = new BokehPass(scene, camera, { focus: P.dofFocus, aperture: P.dofAperture, maxblur: P.dofMaxblur });
+  composer.addPass(bokeh);
+}
 
 const bloom = new UnrealBloomPass(new THREE.Vector2(1024, 1024), P.bloomStrength, P.bloomRadius, P.bloomThreshold);
 composer.addPass(bloom);
@@ -507,6 +556,8 @@ const clock = new THREE.Clock();
 let wakeT = REDUCE ? 1 : 0;
 let awake = false;
 const _proj = new THREE.Vector3();
+const _attract = new THREE.Vector3();
+const _flowerPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);   // z=0, the bloom's plane
 
 function wake() {
   awake = true;
@@ -536,6 +587,14 @@ function tick(dt, t) {
   bloom.strength = P.bloomStrength * (REDUCE ? 1 : 1 + 0.08 * Math.sin(t * 0.11 * Math.PI * 2)) * ease;
   if (pollenMat) { pollenMat.uniforms.uTime.value = t; pollenMat.uniforms.uOpacity.value = ease; }
 
+  // ---- gentle breeze: nod the whole bloom + flutter the petal edges ----
+  const gust = REDUCE ? 0 : (0.72 + 0.28 * Math.sin(t * 0.047 + 0.6)) * ease;   // slow gust envelope
+  swayGroup.rotation.set(
+    P.breezeNod  * gust * (0.6 * Math.sin(t * 0.23)       + 0.4 * Math.sin(t * 0.41 + 1.3)),
+    P.breezeYaw  * gust * (0.6 * Math.sin(t * 0.19 + 0.7) + 0.4 * Math.sin(t * 0.33 + 2.1)),
+    P.breezeRoll * gust *  Math.sin(t * 0.21 + 0.5),
+  );
+
   // orbit targets: mouse/gyro + a slow idle drift, all around the flower's heart
   const idle = REDUCE ? 0 : THREE.MathUtils.clamp((t - lastInput - 2.5) / 3, 0, 1);
   const driftY = idle * P.driftYaw * P.maxYaw * Math.sin(t * 0.16);
@@ -549,11 +608,25 @@ function tick(dt, t) {
   }
   placeCamera(yaw, pitch);
 
+  const windAmp = P.petalWind * (0.6 + 0.4 * gust);
   for (const p of petals) {
     const ud = p.material.userData;
     ud.glow += (ud.glowTarget - ud.glow) * Math.min(1, dt * 6.5);
     const sh = petalShaders[p.name];
-    if (sh) sh.uniforms.uGlow.value = ud.glow;
+    if (sh) { sh.uniforms.uGlow.value = ud.glow; sh.uniforms.uTime.value = t; sh.uniforms.uWindAmp.value = windAmp; }
+  }
+
+  // ---- pollen leans toward the cursor (world point where the ray meets the bloom plane) ----
+  if (pollenMat) {
+    let pullTarget = 0;
+    if (!COARSE) {
+      raycaster.setFromCamera(ndc, camera);
+      if (raycaster.ray.intersectPlane(_flowerPlane, _attract)) {
+        pollenMat.uniforms.uAttract.value.copy(_attract);
+        pullTarget = P.pollenPull * (1 - 0.6 * idle);
+      }
+    }
+    pollenMat.uniforms.uPull.value += (pullTarget - pollenMat.uniforms.uPull.value) * Math.min(1, dt * 2.5);
   }
 
   updateLabel();
@@ -602,11 +675,17 @@ resize();
 window.__flower = {
   P, lights, camera, scene, bloom, grade, petals, petalShaders, renderer, pollenMat,
   renderOnce: renderFrame,
+  bokeh,
   reflow() {
     baseOffset.copy(REST).sub(PIVOT).multiplyScalar(P.zoom);
     bloom.threshold = P.bloomThreshold; bloom.strength = P.bloomStrength; bloom.radius = P.bloomRadius;
     grade.uniforms.uContrast.value = P.contrast; grade.uniforms.uShoulder.value = P.shoulder;
     grade.uniforms.uGrain.value = P.grain; grade.uniforms.uVig.value = P.vignette;
+    if (bokeh) {
+      bokeh.uniforms.focus.value = P.dofFocus;
+      bokeh.uniforms.aperture.value = P.dofAperture;
+      bokeh.uniforms.maxblur.value = P.dofMaxblur;
+    }
     for (const n in petalShaders) {
       const u = petalShaders[n].uniforms;
       u.uSSSScale.value = P.sssScale; u.uSSSDistortion.value = P.sssDistortion;
