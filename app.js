@@ -69,9 +69,9 @@ const P = {
   petalWind: 0.085,       // scene units — petal-edge flutter (tips only, base anchored)
   pollenPull: 0.16,       // how much pollen leans toward the cursor (magnetic drift)
 
-  dragSpeed: 0.0046,      // rad per pixel dragged (click-drag to look around)
-  maxYawOrbit: 0.92,      // rad (~53°) — rich 3D sides; the bloom is shallow, so it slivers past this
-  maxPitchOrbit: 0.5,     // rad (~29°) — look over/under without flipping
+  dragSpeed: 0.0044,      // rad per pixel dragged (click-drag to look around)
+  maxYawOrbit: 0.8,       // rad (~46°) — rich 3D sides, stays inside the (original) wall's edge
+  maxPitchOrbit: 0.4,     // rad (~23°) — look over/under without exposing the wall edge
 };
 
 const REDUCE = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -89,9 +89,14 @@ try {
 renderer.toneMapping = THREE.NoToneMapping;   // Blender view transform was "Standard"; rolloff done in the grade
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.VSMShadowMap;   // Eevee spot had radius 4 — very soft
-renderer.shadowMap.autoUpdate = false;          // the flower barely moves — render the shadow only while it settles
-let maxDpr = Math.min(window.devicePixelRatio || 1, 1.5);   // 1.5 stays crisp on organic content, ~44% less fill than 2
+renderer.shadowMap.autoUpdate = false;          // the flower barely moves — render the shadow only while it settles (big, invisible saving)
+let maxDpr = Math.min(window.devicePixelRatio || 1, 2);   // full crispness back; the removed DOF + frozen shadow keep it light
 renderer.setPixelRatio(maxDpr);
+
+// never loop to black: if the GPU drops the WebGL context under load, keep it
+// (preventDefault lets the browser restore it) and re-render once it's back
+canvas.addEventListener('webglcontextlost', (e) => { e.preventDefault(); }, false);
+canvas.addEventListener('webglcontextrestored', () => { resize(); renderFrame(); }, false);
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color().setRGB(0.014, 0.013, 0.012);
@@ -365,9 +370,7 @@ loader.load('assets/flower.glb?v=2', (gltf) => {
       o.material = MATS[matName]();
     }
     if (o.name === 'center_disc' || o.name === 'stem') { o.castShadow = true; o.receiveShadow = true; }
-    // enlarge the wall so its lit falloff fades to the background at orbit
-    // angles (no hard plane edge / seam when you spin around the flower)
-    if (o.name === 'backdrop') { o.receiveShadow = true; o.scale.multiplyScalar(6); }
+    if (o.name === 'backdrop') o.receiveShadow = true;
   });
   flower.add(gltf.scene);
   flower.updateWorldMatrix(true, true);

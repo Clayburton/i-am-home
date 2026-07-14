@@ -21,21 +21,28 @@ html, body {
 #fallback { position: absolute; inset: 0; background: #0d0c0b; }
 #fallback img { width: 100%; height: 100%; object-fit: cover; }
 
-/* ---- the wordmark (kept high so it clears the top song title) ---- */
+/* ---- the wordmark (kept high so it clears the top song title) ----
+   album logotype feel: refined high-contrast serif, italic, with the "am"
+   drawn tight so the letters read as joined (stand-in until the exact
+   After Effects export is dropped in) ---- */
 #wordmark {
   position: fixed;
   top: clamp(14px, 3.6svh, 40px);
   left: 50%;
   transform: translateX(-50%);
-  font-family: "Playfair Display", Georgia, serif;
-  font-weight: 400;
-  font-size: clamp(27px, 4.4vmin, 50px);
-  letter-spacing: 0.012em;
-  color: #efece6;
-  text-shadow: 0 0 22px rgba(255, 244, 224, 0.16);
+  font-family: "Cormorant Garamond", "Playfair Display", Georgia, serif;
+  font-style: italic;
+  font-weight: 600;
+  font-size: clamp(34px, 5.6vmin, 62px);
+  line-height: 1;
+  color: #f1eee8;
+  text-shadow: 0 0 24px rgba(255, 244, 224, 0.18);
   pointer-events: none;
   user-select: none;
+  white-space: nowrap;
 }
+#wordmark .wm-i { margin-right: 0.16em; }
+#wordmark .wm-am { letter-spacing: -0.05em; }
 
 /* ---- bottom credit + back link ---- */
 #credit {
