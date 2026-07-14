@@ -89,19 +89,17 @@ try {
 renderer.toneMapping = THREE.NoToneMapping;   // Blender view transform was "Standard"; rolloff done in the grade
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.VSMShadowMap;   // Eevee spot had radius 4 — very soft
-renderer.shadowMap.autoUpdate = false;          // the flower barely moves — render the shadow only while it settles (big, invisible saving)
-let maxDpr = Math.min(window.devicePixelRatio || 1, 2);   // full crispness back; the removed DOF + frozen shadow keep it light
+// The shadow renders every frame (measured ~free). Freezing it was a false
+// economy: it went stale/garbage after any GPU blip and snapped as the flower
+// swayed — the "strange shadow popping in and out". Auto-updating self-heals.
+let maxDpr = Math.min(window.devicePixelRatio || 1, 2);
 renderer.setPixelRatio(maxDpr);
 
-// never loop to black: if the GPU drops the WebGL context under load, keep it
-// (preventDefault lets the browser restore it) and re-render once it's back.
-// CRITICAL: the frozen shadow map is garbage after a restore — re-render it,
-// or a blocky "strange shadow" ghost gets projected on the wall forever.
+// if the GPU ever drops the WebGL context, keep it (preventDefault lets the
+// browser restore it) and redraw once it's back — the auto-updating shadow
+// re-renders itself, so nothing stays corrupted
 canvas.addEventListener('webglcontextlost', (e) => { e.preventDefault(); }, false);
-canvas.addEventListener('webglcontextrestored', () => { renderer.shadowMap.needsUpdate = true; resize(); renderFrame(); }, false);
-document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) { renderer.shadowMap.needsUpdate = true; renderFrame(); }
-});
+canvas.addEventListener('webglcontextrestored', () => { resize(); renderFrame(); }, false);
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color().setRGB(0.014, 0.013, 0.012);
@@ -590,7 +588,6 @@ function smoothDamp(cur, target, velRef, smoothTime, dt) {
 const clock = new THREE.Clock();
 let wakeT = REDUCE ? 1 : 0;
 let awake = false;
-let shadowBeat = 0;   // seconds since the soft shadow was last re-rendered
 const _proj = new THREE.Vector3();
 const _attract = new THREE.Vector3();
 const _flowerPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);   // z=0, the bloom's plane
@@ -604,7 +601,6 @@ function wake() {
   // finished scene — no black cut, no dim glitchy background easing in.
   awake = true;
   wakeT = 1;
-  renderer.shadowMap.needsUpdate = true;
   renderFrame();
   document.body.classList.add('awake');
 }
@@ -625,11 +621,6 @@ function updateLabels() {
 function tick(dt, t) {
   if (awake && wakeT < 1) wakeT = Math.min(1, wakeT + dt / 2.6);
   const ease = wakeT * wakeT * (3 - 2 * wakeT);
-  // render the soft shadow while the flower settles, then only on a slow
-  // heartbeat — keeps it cheap, keeps it aligned with the breeze, and
-  // self-heals within seconds if the map is ever corrupted (context blip)
-  shadowBeat += dt;
-  if (wakeT < 1 || shadowBeat > 2.5) { renderer.shadowMap.needsUpdate = true; shadowBeat = 0; }
 
   applyLightExposure(0.25 + 0.75 * ease);
   for (const L of lights.inner) {
