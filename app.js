@@ -94,9 +94,14 @@ let maxDpr = Math.min(window.devicePixelRatio || 1, 2);   // full crispness back
 renderer.setPixelRatio(maxDpr);
 
 // never loop to black: if the GPU drops the WebGL context under load, keep it
-// (preventDefault lets the browser restore it) and re-render once it's back
+// (preventDefault lets the browser restore it) and re-render once it's back.
+// CRITICAL: the frozen shadow map is garbage after a restore — re-render it,
+// or a blocky "strange shadow" ghost gets projected on the wall forever.
 canvas.addEventListener('webglcontextlost', (e) => { e.preventDefault(); }, false);
-canvas.addEventListener('webglcontextrestored', () => { resize(); renderFrame(); }, false);
+canvas.addEventListener('webglcontextrestored', () => { renderer.shadowMap.needsUpdate = true; resize(); renderFrame(); }, false);
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) { renderer.shadowMap.needsUpdate = true; renderFrame(); }
+});
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color().setRGB(0.014, 0.013, 0.012);
@@ -392,8 +397,8 @@ loader.load('assets/flower.glb?v=2', (gltf) => {
     el.addEventListener('click', (ev) => { ev.stopPropagation(); navigate(p); });   // tapping the name (mobile) navigates
     labelsWrap.appendChild(el);
     p.userData.labelEl = el;
-    if (COARSE) el.classList.add('show');   // touch: every name visible as a pickable menu
   }
+  updateLabelMode();
   wake();
 }, undefined, (err) => {
   console.error('GLB load failed', err);
@@ -501,10 +506,20 @@ function petalAt() {
   return hit ? hit.object : null;
 }
 
-// desktop hover: glow the petal + reveal only its name; touch shows them all
+/* label "menu mode": on touch devices OR narrow windows every song name is
+   shown (and tappable) — people without a mouse can see and pick. On a wide
+   desktop the names reveal on hover. Recomputed live on every resize. */
+let labelMenu = false;
+function updateLabelMode() {
+  labelMenu = COARSE || (innerWidth || 1) < 820;
+  document.body.classList.toggle('labels-menu', labelMenu);
+  for (const p of petals) p.userData.labelEl?.classList.toggle('show', labelMenu || p === hovered);
+}
+
+// desktop hover: glow the petal + reveal only its name (menu mode keeps all shown)
 function setHover(petal) {
   if (COARSE || hovered === petal) return;
-  if (hovered) { hovered.material.userData.glowTarget = 0; hovered.userData.labelEl?.classList.remove('show'); }
+  if (hovered) { hovered.material.userData.glowTarget = 0; if (!labelMenu) hovered.userData.labelEl?.classList.remove('show'); }
   hovered = petal;
   if (petal) {
     petal.material.userData.glowTarget = 1;
@@ -575,6 +590,7 @@ function smoothDamp(cur, target, velRef, smoothTime, dt) {
 const clock = new THREE.Clock();
 let wakeT = REDUCE ? 1 : 0;
 let awake = false;
+let shadowBeat = 0;   // seconds since the soft shadow was last re-rendered
 const _proj = new THREE.Vector3();
 const _attract = new THREE.Vector3();
 const _flowerPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);   // z=0, the bloom's plane
@@ -597,14 +613,18 @@ function updateLabels() {
     if (_proj.z > 1) { el.style.visibility = 'hidden'; continue; }   // anchor swung behind the camera → hide
     el.style.visibility = '';
     el.style.left = THREE.MathUtils.clamp((_proj.x * 0.5 + 0.5) * w, 70, w - 70) + 'px';
-    el.style.top  = THREE.MathUtils.clamp((-_proj.y * 0.5 + 0.5) * h, 78, h - 92) + 'px';
+    el.style.top  = THREE.MathUtils.clamp((-_proj.y * 0.5 + 0.5) * h, 118, h - 92) + 'px';   // 118: stay clear of the wordmark
   }
 }
 
 function tick(dt, t) {
   if (awake && wakeT < 1) wakeT = Math.min(1, wakeT + dt / 2.6);
   const ease = wakeT * wakeT * (3 - 2 * wakeT);
-  if (wakeT < 1) renderer.shadowMap.needsUpdate = true;   // render the soft shadow only while the flower settles, then freeze it
+  // render the soft shadow while the flower settles, then only on a slow
+  // heartbeat — keeps it cheap, keeps it aligned with the breeze, and
+  // self-heals within seconds if the map is ever corrupted (context blip)
+  shadowBeat += dt;
+  if (wakeT < 1 || shadowBeat > 2.5) { renderer.shadowMap.needsUpdate = true; shadowBeat = 0; }
 
   applyLightExposure(0.25 + 0.75 * ease);
   for (const L of lights.inner) {
@@ -740,6 +760,7 @@ function resize() {
   grade.uniforms.uRes.value.set(w * maxDpr, h * maxDpr);
   frameCamera();
   computeOrbitCaps();
+  updateLabelMode();
 }
 addEventListener('resize', () => { resize(); renderFrame(); });
 new ResizeObserver(() => { resize(); renderFrame(); }).observe(canvas);
