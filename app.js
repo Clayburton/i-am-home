@@ -1,0 +1,619 @@
+/* i am — album home. A live three.js rebuild of Flower_v9.blend (Eevee).
+   The GLB is Blender→glTF (Y-up); rotating the flower group +90° about X
+   cancels that conversion, so world coordinates equal Blender coordinates —
+   every light/camera/petal position below is copied verbatim from the .blend.
+   The camera ORBITS the flower's heart (never translates), so the parallax
+   reads as real depth; pollen drifts upward; the song name floats outside
+   the hovered petal. */
+
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { RectAreaLightUniformsLib } from 'three/addons/lights/RectAreaLightUniformsLib.js';
+
+/* ================= tracks =================
+   Petals, clockwise from the top: 1=top, 5=top-right, 4=bottom-right,
+   3=bottom, 2=left. Album order maps clockwise from the top. Only "I Am"
+   is live; the rest read "coming soon" until each video ships. Swap a url
+   in and it goes live — nothing else to change. */
+const TRACKS = {
+  petal_1: { title: 'Insecure',        url: null },
+  petal_5: { title: 'You Hurt Me',     url: null },
+  petal_4: { title: 'I Miss You',      url: null },
+  petal_3: { title: 'Memories of Me',  url: null },
+  petal_2: { title: 'I Am',            url: 'https://clayandkelsy.com/i-am-i-am/' },
+};
+
+/* ================= tunables ================= */
+const P = {
+  exposure: 0.5,          // master multiplier on every light
+  keyIntensity: 536,      // 2000W spot, cone-concentrated (W / 2π(1−cosθ))
+  areaIntensity: 18.4,    // 1570W over 1×27.2m strip (W / area / π)
+  pointScale: 0.0796,     // point W → intensity (W / 4π), Eevee-equivalent
+  ambient: 0.09,
+
+  bloomStrength: 0.05,    // subtle — the petals are near-white, so bloom easily
+  bloomRadius: 0.7,
+  bloomThreshold: 0.86,   // only the true speculars bloom, not the whole petal
+
+  contrast: 1.14,
+  pivot: 0.42,
+  shoulder: 0.55,         // filmic highlight rolloff (keeps petal detail near white)
+  grain: 0.014,           // tasteful — barely-there film texture
+  vignette: 0.2,
+
+  sssScale: 0.42,         // petal translucency (pointLights[i].color has intensity)
+  sssDistortion: 0.5,
+  sssPower: 2.2,
+  sssAmbient: 0.004,
+  breathe: 0.12,          // inner-light breathing depth
+
+  zoom: 0.66,             // <1 = closer than the album framing (more 3D)
+  composeY: -1.15,        // look a touch below the heart → bloom sits high
+  maxYaw: 0.135,          // rad — orbit amplitude on the mouse X axis (~7.7°)
+  maxPitch: 0.092,        // rad — orbit amplitude on the mouse Y axis (~5.3°)
+  orbitSmooth: 0.55,      // seconds — critically-damped follow (buttery)
+  driftYaw: 0.4,          // idle orbit, as a fraction of maxYaw
+  driftPitch: 0.34,
+  gyroDeg: 16,            // phone tilt (deg) for full gyro throw
+  gyroThrow: 0.6,
+};
+
+const REDUCE = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const COARSE = matchMedia('(pointer: coarse)').matches;
+
+/* ================= renderer ================= */
+const canvas = document.getElementById('gl');
+let renderer;
+try {
+  renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
+} catch (e) {
+  document.getElementById('fallback').hidden = false;
+  throw e;
+}
+renderer.toneMapping = THREE.NoToneMapping;   // Blender view transform was "Standard"; rolloff done in the grade
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.VSMShadowMap;   // Eevee spot had radius 4 — very soft
+let maxDpr = Math.min(window.devicePixelRatio || 1, 2);
+renderer.setPixelRatio(maxDpr);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color().setRGB(0.014, 0.013, 0.012);
+
+/* camera: 50mm / 36mm sensor (square vfov = 39.6°) */
+const CAM = { vfovSquare: 2 * Math.atan(18 / 50) };
+const camera = new THREE.PerspectiveCamera(39.6, 1, 0.5, 140);
+
+/* orbit rig: the flower's heart is world-origin (center_disc sits at 0,0,0) */
+const PIVOT = new THREE.Vector3(0, 0, 0);
+const REST = new THREE.Vector3(0.086222, -1.845463, 37.647198);  // Blender camera == world
+const baseOffset = REST.clone().sub(PIVOT).multiplyScalar(P.zoom);
+const lookTarget = new THREE.Vector3();
+const _off = new THREE.Vector3();
+const _euler = new THREE.Euler(0, 0, 0, 'YXZ');
+
+function frameCamera() {
+  const w = canvas.clientWidth || innerWidth || 1;
+  const h = canvas.clientHeight || innerHeight || 1;
+  const aspect = w / h;
+  const t = Math.tan(CAM.vfovSquare / 2) * 1.02;
+  const vt = aspect >= 1 ? t : t / aspect;   // portrait: lock horizontal framing
+  camera.fov = THREE.MathUtils.radToDeg(2 * Math.atan(vt));
+  camera.aspect = aspect;
+  camera.updateProjectionMatrix();
+}
+
+function placeCamera(yaw, pitch) {
+  _off.copy(baseOffset);
+  _euler.set(pitch, yaw, 0);
+  _off.applyEuler(_euler);
+  camera.position.copy(PIVOT).add(_off);
+  lookTarget.set(PIVOT.x, PIVOT.y + P.composeY, PIVOT.z);
+  camera.lookAt(lookTarget);
+}
+
+/* flower group: +90° about X cancels the glTF Y-up conversion */
+const flower = new THREE.Group();
+flower.rotation.x = Math.PI / 2;
+scene.add(flower);
+
+/* ================= lights (verbatim from the .blend) ================= */
+RectAreaLightUniformsLib.init();
+const lights = {};
+
+const key = new THREE.SpotLight(0xffffff, P.keyIntensity, 0, 2.30690 / 2, 0.43602, 2);
+key.position.set(2.877, 4.619, 13.629);
+key.target.position.set(1.764, 6.114, 3.804);
+key.castShadow = true;
+key.shadow.mapSize.set(1024, 1024);
+key.shadow.bias = -0.0004;
+key.shadow.normalBias = 0.04;
+key.shadow.radius = 9;
+key.shadow.blurSamples = 16;
+key.shadow.camera.near = 5; key.shadow.camera.far = 45;
+scene.add(key, key.target);
+lights.key = key;
+
+const area = new THREE.RectAreaLight(0xffffff, P.areaIntensity, 1.0, 27.228);
+area.position.set(-0.269, 0.122, 24.044);
+area.lookAt(-0.269, 0.122, 0);
+scene.add(area);
+lights.area = area;
+
+/* the bioluminescence: seven tinted points tucked behind/under the petals */
+const INNER = [
+  { p: [ 2.296,  0.471, -1.437], c: [1, 1, 1],                E: 60, rate: 0.23, ph: 0.0 },
+  { p: [-0.478,  2.709, -1.514], c: [0.852254, 1, 0.971094],  E: 20, rate: 0.31, ph: 1.7 },
+  { p: [ 1.914, -3.725,  0.458], c: [0.959693, 1, 0.760147],  E: 10, rate: 0.27, ph: 3.1 },
+  { p: [-3.659, -0.299, -1.452], c: [1, 1, 1],                E: 10, rate: 0.21, ph: 4.4 },
+  { p: [-1.941, -2.031, -1.141], c: [1, 1, 1],                E: 45, rate: 0.29, ph: 2.2 },
+  { p: [ 1.910, -2.475, -1.982], c: [0.827571, 1, 1],         E: 20, rate: 0.25, ph: 5.3 },
+  { p: [-0.552, -2.941, -1.009], c: [1, 1, 1],                E: 20, rate: 0.33, ph: 0.9 },
+];
+lights.inner = INNER.map((d) => {
+  const L = new THREE.PointLight(new THREE.Color().setRGB(...d.c), 0, 0, 2);
+  L.position.set(...d.p);
+  L.userData = { base: d.E * P.pointScale, rate: d.rate, ph: d.ph };
+  scene.add(L);
+  return L;
+});
+
+const amb = new THREE.AmbientLight(0xffffff, P.ambient);
+scene.add(amb);
+lights.ambient = amb;
+
+function applyLightExposure(wake = 1) {
+  const e = P.exposure * wake;
+  key.intensity = P.keyIntensity * e;
+  area.intensity = P.areaIntensity * e;
+  amb.intensity = P.ambient * e;
+}
+
+/* ================= materials ================= */
+function C(r, g, b) { return new THREE.Color().setRGB(r, g, b); }
+const petalShaders = {};
+
+function makePetalMaterial(name) {
+  const m = new THREE.MeshPhysicalMaterial({
+    color: C(0.9849, 1.0, 0.96994),
+    roughness: 0.85,
+    specularIntensity: 0.32,
+    side: THREE.DoubleSide,
+  });
+  m.onBeforeCompile = (shader) => {
+    shader.uniforms.uSSSColor = { value: C(1.0, 0.86, 0.68) };
+    shader.uniforms.uSSSScale = { value: P.sssScale };
+    shader.uniforms.uSSSDistortion = { value: P.sssDistortion };
+    shader.uniforms.uSSSPower = { value: P.sssPower };
+    shader.uniforms.uSSSAmbient = { value: P.sssAmbient };
+    shader.uniforms.uGlow = { value: 0 };
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <lights_fragment_begin>', `#include <lights_fragment_begin>
+#if NUM_POINT_LIGHTS > 0
+{
+  vec3 fragPos = - vViewPosition;
+  vec3 V = normalize( vViewPosition );
+  vec3 sssTotal = vec3( 0.0 );
+  for ( int i = 0; i < NUM_POINT_LIGHTS; i ++ ) {
+    vec3 lv = pointLights[ i ].position - fragPos;
+    float lightDist = length( lv );
+    vec3 L = lv / lightDist;
+    float atten = getDistanceAttenuation( lightDist, pointLights[ i ].distance, pointLights[ i ].decay );
+    vec3 Lt = normalize( L + normal * uSSSDistortion );
+    float trans = pow( saturate( dot( V, -Lt ) ), uSSSPower );
+    sssTotal += ( trans + uSSSAmbient ) * atten * pointLights[ i ].color;
+  }
+  sssTotal *= uSSSColor * uSSSScale * ( 1.0 + 2.0 * uGlow );
+  reflectedLight.directDiffuse += sssTotal * diffuseColor.rgb;
+  reflectedLight.indirectDiffuse += uGlow * uSSSColor * 0.05;
+}
+#endif`)
+      .replace('void main() {', `uniform vec3 uSSSColor;
+uniform float uSSSScale, uSSSDistortion, uSSSPower, uSSSAmbient, uGlow;
+void main() {`);
+    petalShaders[name] = shader;
+  };
+  m.userData.glow = 0;
+  m.userData.glowTarget = 0;
+  return m;
+}
+
+const MATS = {
+  'Material':     () => Object.assign(new THREE.MeshStandardMaterial({ color: C(0.8, 0.60817, 0), roughness: 1 }),
+                        { emissive: C(1, 0.49008, 0), emissiveIntensity: 9 }),
+  'Material.005': () => Object.assign(new THREE.MeshStandardMaterial({ color: C(1, 0.90841, 0.08731), roughness: 1, side: THREE.DoubleSide }),
+                        { emissive: C(0.44792, 0.42757, 0.18255), emissiveIntensity: 1 }),
+  'Material.006': () => Object.assign(new THREE.MeshStandardMaterial({ color: C(0.8, 0.75131, 0.09842), roughness: 1 }),
+                        { emissive: C(1, 0.86411, 0.12548), emissiveIntensity: 1 }),
+  'Stamen':       () => new THREE.MeshStandardMaterial({ color: C(0.01885, 0.01885, 0.01885), roughness: 0.9326 }),
+  'StamenHair':   () => new THREE.MeshStandardMaterial({ color: C(0.18446, 0.18446, 0.18446), roughness: 1, side: THREE.DoubleSide }),
+  'Stem':         () => new THREE.MeshStandardMaterial({ color: C(0.17886, 0.17886, 0.17886), roughness: 0.5 }),
+  'Background':   () => new THREE.MeshStandardMaterial({ color: C(0.17335, 0.16117, 0.14908), roughness: 0.7534 }),
+};
+
+/* ================= pollen (GPU points, drifting upward) ================= */
+const POLLEN_N = COARSE ? 60 : 96;
+const POLLEN_H = 21, POLLEN_HALF = 7.5;   // recycle band: y ∈ [-7.5, 13.5]
+let pollen = null, pollenMat = null;
+
+function makePollen() {
+  const g = new THREE.BufferGeometry();
+  const pos = new Float32Array(POLLEN_N * 3);
+  const speed = new Float32Array(POLLEN_N);
+  const phase = new Float32Array(POLLEN_N);
+  const amp = new Float32Array(POLLEN_N);
+  const scale = new Float32Array(POLLEN_N);
+  for (let i = 0; i < POLLEN_N; i++) {
+    pos[i * 3]     = (Math.random() * 2 - 1) * 9.5;
+    pos[i * 3 + 1] = Math.random() * POLLEN_H;
+    pos[i * 3 + 2] = -2 + Math.random() * 5.5;
+    speed[i] = 0.35 + Math.random() * 0.7;
+    phase[i] = Math.random() * Math.PI * 2;
+    amp[i] = 0.25 + Math.random() * 0.7;
+    scale[i] = 0.55 + Math.random() * 1.25;
+  }
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setAttribute('aSpeed', new THREE.BufferAttribute(speed, 1));
+  g.setAttribute('aPhase', new THREE.BufferAttribute(phase, 1));
+  g.setAttribute('aAmp', new THREE.BufferAttribute(amp, 1));
+  g.setAttribute('aScale', new THREE.BufferAttribute(scale, 1));
+
+  pollenMat = new THREE.ShaderMaterial({
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+    uniforms: {
+      uTime: { value: 0 }, uH: { value: POLLEN_H }, uHalf: { value: POLLEN_HALF },
+      uDpr: { value: maxDpr }, uSize: { value: 46 },
+      uColor: { value: C(1.0, 0.86, 0.55) }, uOpacity: { value: 0 },
+    },
+    vertexShader: `
+      attribute float aSpeed, aPhase, aAmp, aScale;
+      uniform float uTime, uH, uHalf, uDpr, uSize;
+      varying float vTw;
+      void main() {
+        vec3 p = position;
+        float y = mod(p.y + uTime * aSpeed, uH);
+        p.y = y - uHalf;
+        p.x += aAmp * sin(uTime * 0.24 + aPhase);
+        p.z += aAmp * 0.6 * cos(uTime * 0.19 + aPhase * 1.3);
+        vec4 mv = modelViewMatrix * vec4(p, 1.0);
+        gl_Position = projectionMatrix * mv;
+        gl_PointSize = uSize * aScale * uDpr / max(-mv.z, 0.001);
+        float f = y / uH;
+        float edge = smoothstep(0.0, 0.14, f) * (1.0 - smoothstep(0.82, 1.0, f));
+        vTw = (0.4 + 0.6 * sin(uTime * aSpeed * 3.0 + aPhase * 2.1)) * edge;
+      }`,
+    fragmentShader: `
+      uniform vec3 uColor; uniform float uOpacity;
+      varying float vTw;
+      void main() {
+        float r = length(gl_PointCoord - 0.5);
+        float a = smoothstep(0.5, 0.0, r);
+        a *= a;
+        gl_FragColor = vec4(uColor, a * vTw * uOpacity);
+      }`,
+  });
+  pollen = new THREE.Points(g, pollenMat);
+  pollen.frustumCulled = false;
+  scene.add(pollen);
+}
+makePollen();
+
+/* ================= load ================= */
+const petals = [];
+const _box = new THREE.Box3();
+const loader = new GLTFLoader();
+loader.setMeshoptDecoder(MeshoptDecoder);
+
+loader.load('assets/flower.glb?v=2', (gltf) => {
+  gltf.scene.traverse((o) => {
+    if (!o.isMesh) return;
+    const matName = o.material?.name || '';
+    if (o.name.startsWith('petal_')) {
+      o.material = makePetalMaterial(o.name);
+      o.castShadow = true;
+      o.receiveShadow = true;
+      petals.push(o);
+    } else if (MATS[matName]) {
+      o.material = MATS[matName]();
+    }
+    if (o.name === 'center_disc' || o.name === 'stem') { o.castShadow = true; o.receiveShadow = true; }
+    if (o.name === 'backdrop') o.receiveShadow = true;
+  });
+  flower.add(gltf.scene);
+  flower.updateWorldMatrix(true, true);
+
+  // per-petal 3D anchor for the floating label: push the petal's world
+  // centroid outward (in the flower plane) so the name sits just past the tip
+  for (const p of petals) {
+    _box.setFromObject(p);
+    const c = _box.getCenter(new THREE.Vector3());
+    const dir = new THREE.Vector2(c.x, c.y);
+    if (dir.lengthSq() < 1e-4) dir.set(0, 1);
+    dir.normalize();
+    p.userData.anchor = new THREE.Vector3(dir.x * 8.4, dir.y * 8.4, 1.0);
+  }
+  wake();
+}, undefined, (err) => {
+  console.error('GLB load failed', err);
+  document.getElementById('fallback').hidden = false;
+});
+
+/* ================= composer ================= */
+const rt = new THREE.WebGLRenderTarget(2, 2, { type: THREE.HalfFloatType, samples: COARSE ? 0 : 4 });
+const composer = new EffectComposer(renderer, rt);
+composer.addPass(new RenderPass(scene, camera));
+
+const bloom = new UnrealBloomPass(new THREE.Vector2(1024, 1024), P.bloomStrength, P.bloomRadius, P.bloomThreshold);
+composer.addPass(bloom);
+composer.addPass(new OutputPass());
+
+const GradeShader = {
+  uniforms: {
+    tDiffuse: { value: null },
+    uTime: { value: 0 },
+    uRes: { value: new THREE.Vector2(1, 1) },
+    uContrast: { value: P.contrast },
+    uPivot: { value: P.pivot },
+    uShoulder: { value: P.shoulder },
+    uGrain: { value: P.grain },
+    uVig: { value: P.vignette },
+  },
+  vertexShader: `varying vec2 vUv;
+    void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
+  fragmentShader: `varying vec2 vUv;
+    uniform sampler2D tDiffuse;
+    uniform float uTime, uContrast, uPivot, uShoulder, uGrain, uVig;
+    uniform vec2 uRes;
+    float hash(vec2 p){ p = fract(p*vec2(443.897,441.423)); p += dot(p,p.yx+19.19); return fract((p.x+p.y)*p.x); }
+    // soft filmic shoulder above 0.75 so near-white petals keep their gradient
+    vec3 shoulder(vec3 c, float amt){
+      vec3 k = max(c - 0.75, 0.0);
+      return c - k + (1.0 - exp(-k * 3.2)) * 0.25 * amt + k * (1.0 - amt);
+    }
+    void main(){
+      vec3 c = texture2D(tDiffuse, vUv).rgb;
+      c = (c - uPivot) * uContrast + uPivot;
+      c = shoulder(clamp(c, 0.0, 4.0), uShoulder);
+      float d = distance(vUv * vec2(uRes.x/uRes.y, 1.0), vec2(0.5 * uRes.x/uRes.y, 0.5));
+      c *= 1.0 - uVig * smoothstep(0.34, 0.98, d);
+      float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+      float g = hash(vUv * uRes + mod(uTime, 97.0)) - 0.5;      // grain, shadow-weighted
+      c += g * uGrain * (0.35 + 0.65 * (1.0 - clamp(l, 0.0, 1.0)));
+      gl_FragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
+    }`,
+};
+const grade = new ShaderPass(GradeShader);
+composer.addPass(grade);
+
+/* ================= interaction ================= */
+const raycaster = new THREE.Raycaster();
+const ndc = new THREE.Vector2(-2, -2);
+const labelEl = document.getElementById('label');
+const labelTitle = labelEl.querySelector('.lbl-title');
+const labelSub = labelEl.querySelector('.lbl-sub');
+const flashEl = document.getElementById('flash');
+let hovered = null;
+let armedPetal = null;   // touch: first tap arms, second tap navigates
+
+// orbit input (mouse/gyro), in -1..1
+const aim = { tx: 0, ty: 0 };
+let yaw = 0, pitch = 0;
+const yawVel = { v: 0 }, pitchVel = { v: 0 };
+let lastInput = -10;
+
+function setPointer(clientX, clientY) {
+  const w = innerWidth || canvas.clientWidth || 1;
+  const h = innerHeight || canvas.clientHeight || 1;
+  aim.tx = (clientX / w) * 2 - 1;
+  aim.ty = (clientY / h) * 2 - 1;
+  ndc.set(aim.tx, -aim.ty);
+  lastInput = clock.elapsedTime;
+}
+
+/* gyroscope: phone tilt orbits the camera (iOS asks permission on first tap) */
+let gyroBase = null, gyroArmed = false;
+function onGyro(e) {
+  if (e.gamma == null || e.beta == null) return;
+  if (gyroBase === null) gyroBase = { g: e.gamma, b: e.beta };
+  aim.tx = THREE.MathUtils.clamp((e.gamma - gyroBase.g) / P.gyroDeg, -1, 1) * P.gyroThrow;
+  aim.ty = THREE.MathUtils.clamp((e.beta - gyroBase.b) / P.gyroDeg, -1, 1) * P.gyroThrow;
+  lastInput = clock.elapsedTime;
+}
+function armGyro() {
+  if (gyroArmed || !COARSE) return;
+  gyroArmed = true;
+  const DOE = window.DeviceOrientationEvent;
+  if (DOE?.requestPermission) {
+    DOE.requestPermission().then((s) => { if (s === 'granted') addEventListener('deviceorientation', onGyro); }).catch(() => {});
+  } else if (DOE) {
+    addEventListener('deviceorientation', onGyro);
+  }
+}
+
+function petalAt() {
+  if (!petals.length) return null;
+  raycaster.setFromCamera(ndc, camera);
+  const hit = raycaster.intersectObjects(petals, false)[0];
+  return hit ? hit.object : null;
+}
+
+function showLabel(petal) {
+  const t = TRACKS[petal.name];
+  labelTitle.textContent = t?.title || '';
+  labelSub.textContent = t?.url ? 'listen ↗' : 'coming soon';
+  labelEl.classList.toggle('soon', !t?.url);
+  labelEl.hidden = false;
+  requestAnimationFrame(() => labelEl.classList.add('show'));
+}
+
+function setHover(petal) {
+  if (hovered === petal) return;
+  if (hovered) hovered.material.userData.glowTarget = 0;
+  hovered = petal;
+  if (petal) {
+    petal.material.userData.glowTarget = 1;
+    showLabel(petal);
+    document.body.classList.add('hovering');
+  } else {
+    labelEl.classList.remove('show');
+    document.body.classList.remove('hovering');
+  }
+}
+
+function navigate(petal) {
+  const t = TRACKS[petal.name];
+  if (!t?.url) return;
+  if (REDUCE) { window.open(t.url, '_top'); return; }
+  flashEl.classList.add('on');                       // white fade covers the load; i-am opens on white
+  setTimeout(() => window.open(t.url, '_top'), 330);
+}
+
+addEventListener('pointermove', (e) => {
+  setPointer(e.clientX, e.clientY);
+  if (!COARSE) setHover(petalAt());
+});
+addEventListener('pointerdown', (e) => { setPointer(e.clientX, e.clientY); armGyro(); });
+addEventListener('click', (e) => {
+  setPointer(e.clientX, e.clientY);
+  const petal = petalAt();
+  if (!petal) { setHover(null); armedPetal = null; return; }
+  if (COARSE) {
+    if (armedPetal === petal) { navigate(petal); armedPetal = null; }
+    else { armedPetal = petal; setHover(petal); }
+  } else {
+    navigate(petal);
+  }
+});
+
+/* ================= math ================= */
+// Unity-style critically-damped smoothing — no overshoot, frame-rate independent
+function smoothDamp(cur, target, velRef, smoothTime, dt) {
+  const omega = 2 / Math.max(smoothTime, 1e-4);
+  const x = omega * dt;
+  const exp = 1 / (1 + x + 0.48 * x * x + 0.235 * x * x * x);
+  const change = cur - target;
+  const temp = (velRef.v + omega * change) * dt;
+  velRef.v = (velRef.v - omega * temp) * exp;
+  return target + (change + temp) * exp;
+}
+
+/* ================= life ================= */
+const clock = new THREE.Clock();
+let wakeT = REDUCE ? 1 : 0;
+let awake = false;
+const _proj = new THREE.Vector3();
+
+function wake() {
+  awake = true;
+  document.body.classList.add('awake');
+  renderFrame();
+}
+
+function updateLabel() {
+  if (!hovered || !hovered.userData.anchor) return;
+  _proj.copy(hovered.userData.anchor).project(camera);
+  const w = innerWidth || 1, h = innerHeight || 1;
+  const x = THREE.MathUtils.clamp((_proj.x * 0.5 + 0.5) * w, 90, w - 90);
+  const y = THREE.MathUtils.clamp((-_proj.y * 0.5 + 0.5) * h, 70, h - 70);
+  labelEl.style.left = x + 'px';
+  labelEl.style.top = y + 'px';
+}
+
+function tick(dt, t) {
+  if (awake && wakeT < 1) wakeT = Math.min(1, wakeT + dt / 2.6);
+  const ease = wakeT * wakeT * (3 - 2 * wakeT);
+
+  applyLightExposure(0.25 + 0.75 * ease);
+  for (const L of lights.inner) {
+    const b = REDUCE ? 1 : 1 + P.breathe * Math.sin(t * L.userData.rate * Math.PI * 2 + L.userData.ph);
+    L.intensity = L.userData.base * P.exposure * b * ease;
+  }
+  bloom.strength = P.bloomStrength * (REDUCE ? 1 : 1 + 0.08 * Math.sin(t * 0.11 * Math.PI * 2)) * ease;
+  if (pollenMat) { pollenMat.uniforms.uTime.value = t; pollenMat.uniforms.uOpacity.value = ease; }
+
+  // orbit targets: mouse/gyro + a slow idle drift, all around the flower's heart
+  const idle = REDUCE ? 0 : THREE.MathUtils.clamp((t - lastInput - 2.5) / 3, 0, 1);
+  const driftY = idle * P.driftYaw * P.maxYaw * Math.sin(t * 0.16);
+  const driftP = idle * P.driftPitch * P.maxPitch * Math.sin(t * 0.13 + 1.3);
+  const yawT = aim.tx * P.maxYaw + driftY;
+  const pitchT = aim.ty * P.maxPitch + driftP;
+  if (REDUCE) { yaw = yawT; pitch = pitchT; }
+  else {
+    yaw = smoothDamp(yaw, yawT, yawVel, P.orbitSmooth, dt);
+    pitch = smoothDamp(pitch, pitchT, pitchVel, P.orbitSmooth, dt);
+  }
+  placeCamera(yaw, pitch);
+
+  for (const p of petals) {
+    const ud = p.material.userData;
+    ud.glow += (ud.glowTarget - ud.glow) * Math.min(1, dt * 6.5);
+    const sh = petalShaders[p.name];
+    if (sh) sh.uniforms.uGlow.value = ud.glow;
+  }
+
+  updateLabel();
+  grade.uniforms.uTime.value = REDUCE ? 1 : t;
+}
+
+function renderFrame() {
+  tick(1 / 60, clock.elapsedTime);
+  composer.render();
+}
+
+/* adaptive resolution: drop pixel ratio if we can't hold framerate */
+let slow = 0;
+function adapt(dt) {
+  if (dt > 0.024) slow++; else slow = Math.max(0, slow - 2);
+  if (slow > 90 && maxDpr > 1) {
+    maxDpr = Math.max(1, maxDpr - 0.5);
+    renderer.setPixelRatio(maxDpr);
+    if (pollenMat) pollenMat.uniforms.uDpr.value = maxDpr;
+    resize();
+    slow = 0;
+  }
+}
+
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.1);
+  tick(dt, clock.elapsedTime);
+  composer.render();
+  adapt(dt);
+});
+
+/* ================= resize ================= */
+function resize() {
+  const w = canvas.clientWidth || innerWidth || 1;
+  const h = canvas.clientHeight || innerHeight || 1;
+  renderer.setSize(w, h, false);
+  composer.setSize(w, h);
+  grade.uniforms.uRes.value.set(w * maxDpr, h * maxDpr);
+  frameCamera();
+}
+addEventListener('resize', () => { resize(); renderFrame(); });
+new ResizeObserver(() => { resize(); renderFrame(); }).observe(canvas);
+resize();
+
+/* ================= debug hooks ================= */
+window.__flower = {
+  P, lights, camera, scene, bloom, grade, petals, petalShaders, renderer, pollenMat,
+  renderOnce: renderFrame,
+  reflow() {
+    baseOffset.copy(REST).sub(PIVOT).multiplyScalar(P.zoom);
+    bloom.threshold = P.bloomThreshold; bloom.strength = P.bloomStrength; bloom.radius = P.bloomRadius;
+    grade.uniforms.uContrast.value = P.contrast; grade.uniforms.uShoulder.value = P.shoulder;
+    grade.uniforms.uGrain.value = P.grain; grade.uniforms.uVig.value = P.vignette;
+    for (const n in petalShaders) {
+      const u = petalShaders[n].uniforms;
+      u.uSSSScale.value = P.sssScale; u.uSSSDistortion.value = P.sssDistortion;
+    }
+    renderFrame();
+  },
+  setAim(x, y) { aim.tx = x; aim.ty = y; ndc.set(x, -y); renderFrame(); },
+  hover(name) { const p = petals.find(q => q.name === name); if (p) setHover(p); renderFrame(); },
+  wakeNow() { wakeT = 1; renderFrame(); },
+};

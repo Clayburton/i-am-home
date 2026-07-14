@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>i am — clay and kelsy</title>
+<meta name="description" content="i am — the album. a living flower. click a petal.">
+<link rel="stylesheet" href="styles.css?v=7">
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,500;1,400;1,500&family=Courier+Prime:wght@400;700&display=swap" rel="stylesheet">
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.185.1/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.185.1/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+  <div id="stage">
+    <canvas id="gl"></canvas>
+    <div id="fallback" hidden>
+      <img src="assets/poster.jpg" alt="i am — album cover">
+    </div>
+  </div>
+
+  <div id="wordmark" class="veil">I&nbsp;am</div>
+
+  <!-- floating song name, anchored just outside the hovered petal -->
+  <div id="label" hidden><span class="lbl-inner"><span class="lbl-title"></span><span class="lbl-sub"></span></span></div>
+
+  <a id="backlink" class="veil" href="https://clayandkelsy.com/" target="_top" rel="noopener">clayandkelsy.com&nbsp;&#8599;</a>
+  <div id="credit" class="veil">clay <span>and</span> kelsy</div>
+
+  <div id="flash" aria-hidden="true"></div>
+  <div id="loading"><span>loading</span></div>
+
+  <script type="module" src="app.js?v=6"></script>
+</body>
+</html>
