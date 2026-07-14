@@ -335,7 +335,7 @@ loader.load('assets/flower.glb?v=2', (gltf) => {
     const dir = new THREE.Vector2(c.x, c.y);
     if (dir.lengthSq() < 1e-4) dir.set(0, 1);
     dir.normalize();
-    p.userData.anchor = new THREE.Vector3(dir.x * 8.4, dir.y * 8.4, 1.0);
+    p.userData.anchor = new THREE.Vector3(dir.x * 7.8, dir.y * 7.8, 1.0);
   }
   wake();
 }, undefined, (err) => {
@@ -458,10 +458,10 @@ function setHover(petal) {
   if (petal) {
     petal.material.userData.glowTarget = 1;
     showLabel(petal);
-    document.body.classList.add('hovering');
+    document.body.classList.add('hovering', 'reading');   // let the chrome recede
   } else {
     labelEl.classList.remove('show');
-    document.body.classList.remove('hovering');
+    document.body.classList.remove('hovering', 'reading');
   }
 }
 
@@ -518,8 +518,8 @@ function updateLabel() {
   if (!hovered || !hovered.userData.anchor) return;
   _proj.copy(hovered.userData.anchor).project(camera);
   const w = innerWidth || 1, h = innerHeight || 1;
-  const x = THREE.MathUtils.clamp((_proj.x * 0.5 + 0.5) * w, 90, w - 90);
-  const y = THREE.MathUtils.clamp((-_proj.y * 0.5 + 0.5) * h, 70, h - 70);
+  const x = THREE.MathUtils.clamp((_proj.x * 0.5 + 0.5) * w, 96, w - 96);
+  const y = THREE.MathUtils.clamp((-_proj.y * 0.5 + 0.5) * h, 92, h - 104);
   labelEl.style.left = x + 'px';
   labelEl.style.top = y + 'px';
 }

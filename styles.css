@@ -72,6 +72,11 @@ html, body {
 .veil { opacity: 0; transition: opacity 2.6s ease 0.9s; }
 body.awake .veil { opacity: 1; }
 
+/* while reading a petal, the decorative chrome recedes so the floating
+   song name owns the frame (id beats .veil, so this wins over body.awake) */
+body.reading #wordmark { opacity: 0.1; transition: opacity 0.6s ease; }
+body.reading #credit   { opacity: 0;   transition: opacity 0.6s ease; }
+
 /* ---- floating song name (anchored outside the petal, gently drifting) ---- */
 #label {
   position: fixed;
