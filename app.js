@@ -694,6 +694,43 @@ renderer.setAnimationLoop(() => {
   adapt(dt);
 });
 
+/* ================= dynamic orbit clamp ================= */
+/* The backdrop is a finite plane; how far you can orbit before its edge
+   enters frame depends on the viewport's aspect. Rather than a fixed cap
+   that's either edge-showing on wide screens or tiny on tall ones, we solve
+   for the largest orbit (keeping the desired yaw:pitch ratio) where all four
+   screen corners still land inside the wall — recomputed on every resize. */
+const DESIRED_YAW = 0.8, DESIRED_PITCH = 0.4;   // rad — the most we'd ever want (~46° / 23°)
+const WALL = { minx: -28.4, maxx: 28.3, miny: -28.3, maxy: 28.3, z: -1.96, margin: 1.6 };
+const _corner = new THREE.Vector3();
+
+function orbitCornersClear(scale) {
+  for (const sy of [-1, 1]) for (const sp of [-1, 1]) {
+    placeCamera(sy * scale * DESIRED_YAW, sp * scale * DESIRED_PITCH);
+    camera.updateMatrixWorld(true);
+    const o = camera.position;
+    for (const nx of [-1, 1]) for (const ny of [-1, 1]) {
+      _corner.set(nx, ny, 0.5).unproject(camera);
+      const t = (WALL.z - o.z) / (_corner.z - o.z);
+      if (t < 0) return false;                       // wall behind the camera → edge/void in view
+      const hx = o.x + (_corner.x - o.x) * t;
+      const hy = o.y + (_corner.y - o.y) * t;
+      if (hx < WALL.minx + WALL.margin || hx > WALL.maxx - WALL.margin ||
+          hy < WALL.miny + WALL.margin || hy > WALL.maxy - WALL.margin) return false;
+    }
+  }
+  return true;
+}
+
+function computeOrbitCaps() {
+  let lo = 0, hi = 1;
+  if (orbitCornersClear(1)) lo = 1;                  // the full desired orbit already fits
+  else for (let i = 0; i < 16; i++) { const mid = (lo + hi) / 2; if (orbitCornersClear(mid)) lo = mid; else hi = mid; }
+  P.maxYawOrbit = lo * DESIRED_YAW;
+  P.maxPitchOrbit = lo * DESIRED_PITCH;
+  placeCamera(yaw, pitch);                           // restore the live view
+}
+
 /* ================= resize ================= */
 function resize() {
   const w = canvas.clientWidth || innerWidth || 1;
@@ -702,6 +739,7 @@ function resize() {
   composer.setSize(w, h);
   grade.uniforms.uRes.value.set(w * maxDpr, h * maxDpr);
   frameCamera();
+  computeOrbitCaps();
 }
 addEventListener('resize', () => { resize(); renderFrame(); });
 new ResizeObserver(() => { resize(); renderFrame(); }).observe(canvas);
