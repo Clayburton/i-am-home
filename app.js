@@ -101,6 +101,17 @@ renderer.setPixelRatio(maxDpr);
 canvas.addEventListener('webglcontextlost', (e) => { e.preventDefault(); }, false);
 canvas.addEventListener('webglcontextrestored', () => { resize(); renderFrame(); }, false);
 
+// iOS Safari back/forward (bfcache): the page is restored from memory but the
+// WebGL context is often silently dead and 'webglcontextrestored' never fires —
+// the flower comes back blank until a manual refresh. On a bfcache restore,
+// hard-reload if the context is lost (nothing else recovers it), else just repaint.
+addEventListener('pageshow', (e) => {
+  if (!e.persisted) return;                       // only restored-from-bfcache needs help
+  const gl = renderer.getContext && renderer.getContext();
+  if (gl && gl.isContextLost && gl.isContextLost()) location.reload();
+  else { resize(); renderFrame(); }
+});
+
 const scene = new THREE.Scene();
 scene.background = new THREE.Color().setRGB(0.014, 0.013, 0.012);
 
