@@ -22,7 +22,7 @@ import { RectAreaLightUniformsLib } from 'three/addons/lights/RectAreaLightUnifo
    is live; the rest read "coming soon" until each video ships. Swap a url
    in and it goes live — nothing else to change. */
 const TRACKS = {
-  petal_1: { title: 'Insecure',        url: null },
+  petal_1: { title: 'Insecure',        url: 'https://clayandkelsy.com/i-am-insecure/' },
   petal_5: { title: 'You Hurt Me',     url: 'https://clayandkelsy.com/i-am-you-hurt-me/' },
   petal_4: { title: 'I Miss You',      url: 'https://clayandkelsy.com/i-am-i-miss-you/' },
   petal_3: { title: 'Memories of Me',  url: 'https://clayandkelsy.com/i-am-memories-of-me/' },
