@@ -403,7 +403,7 @@ loader.load('assets/flower.glb?v=2', (gltf) => {
   // centroid outward (in the flower plane) so the name sits just past the tip
   const LABEL_R = { petal_3: 6.7 };   // Memories of Me (bottom) sits a touch closer to its petal
   // per-petal world nudge (x=+right / y=+up) for breathing room where a name crowds an edge
-  const LABEL_OFF = { petal_1: new THREE.Vector3(-1.5, 1.0, 0) };   // Insecure: up + left
+  const LABEL_OFF = { petal_1: new THREE.Vector3(-2.1, 2.3, 0) };   // Insecure: up + left
   const _zeroOff = new THREE.Vector3();
   for (const p of petals) {
     _box.setFromObject(p);
