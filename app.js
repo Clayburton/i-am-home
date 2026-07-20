@@ -106,7 +106,17 @@ canvas.addEventListener('webglcontextrestored', () => { resize(); renderFrame();
 // the flower comes back blank until a manual refresh. On a bfcache restore,
 // hard-reload if the context is lost (nothing else recovers it), else just repaint.
 addEventListener('pageshow', (e) => {
-  if (!e.persisted) return;                       // only restored-from-bfcache needs help
+  // ALWAYS clear the white navigation flash first: pressing back restores the
+  // page from bfcache exactly as it was mid-navigation — flash fully opaque —
+  // which reads as "the page won't load". Snap it away (no fade) so the flower
+  // is visible the instant the page returns.
+  const fl = document.getElementById('flash');
+  if (fl && fl.classList.contains('on')) {
+    fl.style.transition = 'none';
+    fl.classList.remove('on');
+    setTimeout(() => { fl.style.transition = ''; }, 120);   // restore the fade for the next navigate
+  }
+  if (!e.persisted) return;                       // only restored-from-bfcache needs the GL check
   const gl = renderer.getContext && renderer.getContext();
   if (gl && gl.isContextLost && gl.isContextLost()) location.reload();
   else { resize(); renderFrame(); }
