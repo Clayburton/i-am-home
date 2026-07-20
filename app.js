@@ -391,13 +391,15 @@ loader.load('assets/flower.glb?v=2', (gltf) => {
 
   // per-petal 3D anchor for the floating label: push the petal's world
   // centroid outward (in the flower plane) so the name sits just past the tip
+  const LABEL_R = { petal_3: 6.7 };   // Memories of Me (bottom) sits a touch closer to its petal
   for (const p of petals) {
     _box.setFromObject(p);
     const c = _box.getCenter(new THREE.Vector3());
     const dir = new THREE.Vector2(c.x, c.y);
     if (dir.lengthSq() < 1e-4) dir.set(0, 1);
     dir.normalize();
-    p.userData.anchor = new THREE.Vector3(dir.x * 7.8, dir.y * 7.8, 1.0);
+    const r = LABEL_R[p.name] || 7.8;
+    p.userData.anchor = new THREE.Vector3(dir.x * r, dir.y * r, 1.0);
 
     // one floating song name per petal
     const el = document.createElement('div');
