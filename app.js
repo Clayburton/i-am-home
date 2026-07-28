@@ -408,6 +408,8 @@ loader.load('assets/flower.glb?v=2', (gltf) => {
   // it far off its petal — there it's dropped and the name hugs its petal like
   // the other four.
   const LABEL_OFF = { petal_1: new THREE.Vector3(-2.1, 2.3, 0) };   // Insecure: up + left
+  // MENU-MODE (touch / narrow) nudge — world units, so it scales with the bloom
+  const LABEL_OFF_MENU = { petal_1: new THREE.Vector3(0, -0.75, 0) };   // Insecure: a little closer to its petal
   for (const p of petals) {
     _box.setFromObject(p);
     const c = _box.getCenter(new THREE.Vector3());
@@ -417,6 +419,7 @@ loader.load('assets/flower.glb?v=2', (gltf) => {
     const r = LABEL_R[p.name] || 7.8;
     p.userData.anchor = new THREE.Vector3(dir.x * r, dir.y * r, 1.0);
     p.userData.anchorOff = LABEL_OFF[p.name] || null;
+    p.userData.anchorOffMenu = LABEL_OFF_MENU[p.name] || null;
 
     // one floating song name per petal
     const el = document.createElement('div');
@@ -650,7 +653,8 @@ function updateLabels() {
     const el = p.userData.labelEl;
     if (!el || !el.classList.contains('show')) continue;
     _proj.copy(p.userData.anchor);
-    if (!labelMenu && p.userData.anchorOff) _proj.add(p.userData.anchorOff);   // wide-screen nudge only
+    const off = labelMenu ? p.userData.anchorOffMenu : p.userData.anchorOff;
+    if (off) _proj.add(off);
     _proj.project(camera);
     if (_proj.z > 1) { el.style.visibility = 'hidden'; continue; }   // anchor swung behind the camera → hide
     el.style.visibility = '';
