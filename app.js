@@ -402,9 +402,12 @@ loader.load('assets/flower.glb?v=2', (gltf) => {
   // per-petal 3D anchor for the floating label: push the petal's world
   // centroid outward (in the flower plane) so the name sits just past the tip
   const LABEL_R = { petal_3: 6.7 };   // Memories of Me (bottom) sits a touch closer to its petal
-  // per-petal world nudge (x=+right / y=+up) for breathing room where a name crowds an edge
+  // WIDE-SCREEN ONLY nudge (x=+right / y=+up). On desktop the top name is pinned
+  // near the top of the frame, so this slides it clear of the centred wordmark.
+  // In menu mode (touch / narrow) nothing pins it, so the nudge would just push
+  // it far off its petal — there it's dropped and the name hugs its petal like
+  // the other four.
   const LABEL_OFF = { petal_1: new THREE.Vector3(-2.1, 2.3, 0) };   // Insecure: up + left
-  const _zeroOff = new THREE.Vector3();
   for (const p of petals) {
     _box.setFromObject(p);
     const c = _box.getCenter(new THREE.Vector3());
@@ -412,7 +415,8 @@ loader.load('assets/flower.glb?v=2', (gltf) => {
     if (dir.lengthSq() < 1e-4) dir.set(0, 1);
     dir.normalize();
     const r = LABEL_R[p.name] || 7.8;
-    p.userData.anchor = new THREE.Vector3(dir.x * r, dir.y * r, 1.0).add(LABEL_OFF[p.name] || _zeroOff);
+    p.userData.anchor = new THREE.Vector3(dir.x * r, dir.y * r, 1.0);
+    p.userData.anchorOff = LABEL_OFF[p.name] || null;
 
     // one floating song name per petal
     const el = document.createElement('div');
@@ -537,10 +541,13 @@ function petalAt() {
    shown (and tappable) — people without a mouse can see and pick. On a wide
    desktop the names reveal on hover. Recomputed live on every resize. */
 let labelMenu = false;
+let wordmarkBottom = 110;   // measured on resize (cheap) so updateLabels never forces a layout
 function updateLabelMode() {
   labelMenu = COARSE || (innerWidth || 1) < 820;
   document.body.classList.toggle('labels-menu', labelMenu);
   for (const p of petals) p.userData.labelEl?.classList.toggle('show', labelMenu || p === hovered);
+  const wm = document.getElementById('wordmark');
+  if (wm) { const r = wm.getBoundingClientRect(); if (r.height) wordmarkBottom = r.bottom; }
 }
 
 // desktop hover: glow the petal + reveal only its name (menu mode keeps all shown)
@@ -636,14 +643,19 @@ function wake() {
 
 function updateLabels() {
   const w = innerWidth || 1, h = innerHeight || 1;
+  // in menu mode the top name isn't pinned, so it must clear the wordmark on
+  // its own; on wide screens 118 is the long-standing (good-looking) value
+  const minY = labelMenu ? Math.max(118, wordmarkBottom + 30) : 118;
   for (const p of petals) {
     const el = p.userData.labelEl;
     if (!el || !el.classList.contains('show')) continue;
-    _proj.copy(p.userData.anchor).project(camera);
+    _proj.copy(p.userData.anchor);
+    if (!labelMenu && p.userData.anchorOff) _proj.add(p.userData.anchorOff);   // wide-screen nudge only
+    _proj.project(camera);
     if (_proj.z > 1) { el.style.visibility = 'hidden'; continue; }   // anchor swung behind the camera → hide
     el.style.visibility = '';
     el.style.left = THREE.MathUtils.clamp((_proj.x * 0.5 + 0.5) * w, 70, w - 70) + 'px';
-    el.style.top  = THREE.MathUtils.clamp((-_proj.y * 0.5 + 0.5) * h, 118, h - 92) + 'px';   // 118: stay clear of the wordmark
+    el.style.top  = THREE.MathUtils.clamp((-_proj.y * 0.5 + 0.5) * h, minY, h - 92) + 'px';
   }
 }
 
